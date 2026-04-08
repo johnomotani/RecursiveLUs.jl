@@ -1,0 +1,13 @@
+name = "RecursiveLUs"
+uuid = "16de62c6-7569-4410-9c3f-4d5d9d54e565"
+authors = ["John Omotani <john.omotani@ukaea.uk> and contributors"]
+version = "1.0.0-DEV"
+
+[compat]
+julia = "1.12"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
