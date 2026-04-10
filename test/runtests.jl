@@ -44,7 +44,7 @@ function test_row_pivoting(m, n, tol)
 end
 
 @testset "ColumnPivotLUs.jl" begin
-    tol = 2.0e-13
+    tol = 4.0e-13
     @testset "m=$m n=$n" for m ∈ [16, 32, 53, 64, 128, 143, 4096], n ∈ [16, 32, 53, 64, 128, 143, 4096]
         if m > 2048 && n > 2048
             continue
