@@ -2,7 +2,7 @@ module ColumnPivotLUs
 
 export row_pivot_lu!, column_pivot_lu!
 
-using LoopVectorization
+#using LoopVectorization
 using LinearAlgebra
 using LinearAlgebra.BLAS: trsm!
 
@@ -155,10 +155,10 @@ function recursive_column_pivot_lu!(A::AbstractMatrix, jpiv::AbstractVector{<:In
             # Update A22
             A12 = @view A[1:m1,m1+1:n]
             A22 = @view A[m1+1:m,m1+1:n]
-            #mul!(A22, A21, A12, -1.0, 1.0)
-            @turbo for j ∈ 1:n2, k ∈ 1:m1, i ∈ 1:m2
-                A22[i,j] -= A21[i,k] * A12[k,j]
-            end
+            mul!(A22, A21, A12, -1.0, 1.0)
+            #@turbo for j ∈ 1:n2, k ∈ 1:m1, i ∈ 1:m2
+            #    A22[i,j] -= A21[i,k] * A12[k,j]
+            #end
 
             # Factor A22
             right_jpiv = @view jpiv[m1+1:min(m,n)]
