@@ -42,6 +42,7 @@ struct ColumnPivotLUMPI{Vecint,Vecfloat}
     proc_I::Int64
     proc_j::Int64
     proc_J::Int64
+    use_rectangular_parallelism_threshold::Int64
 end
 
 struct RowPivotLU
@@ -91,8 +92,13 @@ function get_column_pivot_lu(jpiv::Union{Vector{Int64},Nothing}, comm::MPI.Comm,
     proc_J = nproc ÷ proc_I
     proc_j, proc_i = divrem(rank, proc_I)
 
+    # Approximate aspect ratio of processor grid is proc_J ÷ proc_I. When the matrix being
+    # solved is a lot more rectangular than this, we want to switch to a linear process
+    # grid.
+    use_rectangular_parallelism_threshold = (8 * proc_I) ÷ proc_J
+
     return ColumnPivotLUMPI(jpiv, comm, index_buffer, maxabs_buffer, rank, nproc, proc_i,
-                            proc_I, proc_j, proc_J)
+                            proc_I, proc_j, proc_J, use_rectangular_parallelism_threshold)
 end
 
 """
@@ -332,12 +338,14 @@ function blocked_column_pivot_lu!(cplu::ColumnPivotLUMPI, A::AbstractMatrix, m::
         proc_j = cplu.proc_j
         proc_I = cplu.proc_I
         proc_J = cplu.proc_J
+        rectangular_threshold = cplu.use_rectangular_parallelism_threshold
         n_diag = min(m, n)
 
         if n_diag ≤ block_size
             return recursive_column_pivot_lu!(cplu, A, jpiv, m, n)
         end
 
+        rectangular_parallelism = true
         for i ∈ 1:block_size:n_diag
             ib = min(block_size, n_diag - i + 1)
             ie = i + ib - 1
@@ -363,6 +371,12 @@ function blocked_column_pivot_lu!(cplu::ColumnPivotLUMPI, A::AbstractMatrix, m::
                 m2 = m - ie
                 n2 = n - ie
 
+                # Once we switch off rectangular parallelism, the aspect ratio
+                # (width/height) of the matrix only gets larger, so we can stop checking.
+                if rectangular_parallelism && n2 > m2 * rectangular_threshold
+                    rectangular_parallelism = false
+                end
+
                 # Apply interchanges to rows i+ib:m.
                 # Column swaps are not parallelised, because memory copies probably do not
                 # benefit much from parallism (limited just by memory bandwidth) and the
@@ -385,10 +399,16 @@ function blocked_column_pivot_lu!(cplu::ColumnPivotLUMPI, A::AbstractMatrix, m::
 
                 if i + ib ≤ n
                     # Update trailing submatrix.
-                    cols_per_proc = (n2 + proc_J - 1) ÷ proc_J
-                    col_range = proc_j*cols_per_proc+ie+1:min((proc_j+1)*cols_per_proc+ie,n)
-                    rows_per_proc = (m2 + proc_I - 1) ÷ proc_I
-                    row_range = proc_i*rows_per_proc+ie+1:min((proc_i+1)*rows_per_proc+ie,m)
+                    if rectangular_parallelism
+                        cols_per_proc = (n2 + proc_J - 1) ÷ proc_J
+                        col_range = proc_j*cols_per_proc+ie+1:min((proc_j+1)*cols_per_proc+ie,n)
+                        rows_per_proc = (m2 + proc_I - 1) ÷ proc_I
+                        row_range = proc_i*rows_per_proc+ie+1:min((proc_i+1)*rows_per_proc+ie,m)
+                    else
+                        cols_per_proc = (n2 + nproc - 1) ÷ nproc
+                        col_range = rank*cols_per_proc+ie+1:min((rank+1)*cols_per_proc+ie,n)
+                        row_range = ie+1:m
+                    end
                     if !isempty(col_range) && ! isempty(row_range)
                         A21 = @view A[row_range,i:ie]
                         A12 = @view A[i:ie,col_range]
