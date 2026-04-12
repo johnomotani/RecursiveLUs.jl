@@ -16,9 +16,11 @@ module ColumnPivotLUs
 export get_column_pivot_lu, get_row_pivot_lu
 
 #using LoopVectorization
+using Combinatorics
 using LinearAlgebra
 using LinearAlgebra.BLAS: trsm!
 using MPI
+using Primes
 
 import LinearAlgebra: lu!
 
@@ -36,6 +38,10 @@ struct ColumnPivotLUMPI{Vecint,Vecfloat}
     maxabs_buffer::Vecfloat
     rank::Int64
     nproc::Int64
+    proc_i::Int64
+    proc_I::Int64
+    proc_j::Int64
+    proc_J::Int64
 end
 
 struct RowPivotLU
@@ -74,7 +80,19 @@ function get_column_pivot_lu(jpiv::Union{Vector{Int64},Nothing}, comm::MPI.Comm,
                              maxabs_buffer::AbstractVector{<:Number})
     rank = MPI.Comm_rank(comm)
     nproc = MPI.Comm_size(comm)
-    return ColumnPivotLUMPI(jpiv, comm, index_buffer, maxabs_buffer, rank, nproc)
+
+    # Set up a rectangular grid of processes.
+    nproc_factors =
+        [prod(x) for x in collect(unique(combinations(factor(Vector, nproc))))]
+    # Make rectangular grid as close to square as possible, with more columns than rows.
+    # Find the last factor ≤ sqrt(nproc)
+    factor_ind = findlast(x -> x≤sqrt(nproc), nproc_factors)
+    proc_I = nproc_factors[factor_ind]
+    proc_J = nproc ÷ proc_I
+    proc_j, proc_i = divrem(rank, proc_I)
+
+    return ColumnPivotLUMPI(jpiv, comm, index_buffer, maxabs_buffer, rank, nproc, proc_i,
+                            proc_I, proc_j, proc_J)
 end
 
 """
@@ -310,6 +328,10 @@ function blocked_column_pivot_lu!(cplu::ColumnPivotLUMPI, A::AbstractMatrix, m::
         comm = cplu.comm
         rank = cplu.rank
         nproc = cplu.nproc
+        proc_i = cplu.proc_i
+        proc_j = cplu.proc_j
+        proc_I = cplu.proc_I
+        proc_J = cplu.proc_J
         n_diag = min(m, n)
 
         if n_diag ≤ block_size
@@ -363,12 +385,14 @@ function blocked_column_pivot_lu!(cplu::ColumnPivotLUMPI, A::AbstractMatrix, m::
 
                 if i + ib ≤ n
                     # Update trailing submatrix.
-                    cols_per_proc = (n2 + nproc - 1) ÷ nproc
-                    col_range = rank*cols_per_proc+ie+1:min((rank+1)*cols_per_proc+ie,n)
-                    if !isempty(col_range)
-                        A21 = @view A[ie+1:m,i:ie]
+                    cols_per_proc = (n2 + proc_J - 1) ÷ proc_J
+                    col_range = proc_j*cols_per_proc+ie+1:min((proc_j+1)*cols_per_proc+ie,n)
+                    rows_per_proc = (m2 + proc_I - 1) ÷ proc_I
+                    row_range = proc_i*rows_per_proc+ie+1:min((proc_i+1)*rows_per_proc+ie,m)
+                    if !isempty(col_range) && ! isempty(row_range)
+                        A21 = @view A[row_range,i:ie]
                         A12 = @view A[i:ie,col_range]
-                        A22 = @view A[ie+1:m,col_range]
+                        A22 = @view A[row_range,col_range]
                         mul!(A22, A21, A12, -1.0, 1.0)
                     end
                 end
