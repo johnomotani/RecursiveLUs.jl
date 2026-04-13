@@ -2,10 +2,12 @@ using BenchmarkTools
 using Dates
 using LinearAlgebra
 using MPI
+using Profile
 using StableRNGs
+using StatProfilerHTML
 using ColumnPivotLUs
 
-function mpi_benchmark(short_size::Integer, long_size::Integer, nsamples::Integer)
+function mpi_profile(short_size::Integer, long_size::Integer, nsamples::Integer)
     # Here we compare serial version of all algorithms.
     BLAS.set_num_threads(1)
 
@@ -48,9 +50,6 @@ function mpi_benchmark(short_size::Integer, long_size::Integer, nsamples::Intege
         return array
     end
 
-    dat_dir = "benchmark-data"
-    mkpath(dat_dir)
-
     Accopy = allocate_shared_float(short_size, long_size)
     index_buffer = allocate_shared_int(nproc)
     maxabs_buffer = allocate_shared_float(nproc)
@@ -59,29 +58,36 @@ function mpi_benchmark(short_size::Integer, long_size::Integer, nsamples::Intege
         Ac = rand(short_size, long_size)
         jpiv = zeros(Int64, short_size)
 
-        println("ColumnPivotLUMPI Benchmark np=$nproc short_size=$short_size, long_size=$long_size, ", now())
+        Accopy .= Ac
+
+        println("ColumnPivotLUMPI profile np=$nproc short_size=$short_size, long_size=$long_size, ", now())
         println("=====================================================================================")
         println()
     else
         Ac = nothing
         jpiv = zeros(Int64, 0)
     end
-    Alu = get_column_pivot_lu(jpiv, comm, index_buffer, maxabs_buffer)
+    Acplu = get_column_pivot_lu(jpiv, comm, index_buffer, maxabs_buffer)
+
+    MPI.Barrier(comm)
+    lu!(Acplu, Accopy)
 
     MPI.Barrier(comm)
 
-    # Do a fixed number of samples (with no limit on benchmark time) to ensure that all
-    # MPI processes do exactly the same number of calls. Otherwise, the benchmark will
-    # hang intermittently.
-    b = @benchmark lu!($Alu, $Accopy) setup=($rank == 0 && copyto!($Accopy, $Ac); MPI.Barrier($comm)) teardown=(MPI.Barrier($comm)) samples=nsamples evals=1 seconds=Inf
-
-    if rank == 0
-        display(b)
-        println()
-        open(joinpath(dat_dir, "CP-$short_size-$long_size.dat"), "a") do io
-            println(io, minimum(b.times) * 1.0e-6)
+    @profile begin
+        for i ∈ 1:nsamples
+            if rank == 0
+                Accopy .= Ac
+            end
+            MPI.Barrier(comm)
+            lu!(Acplu, Accopy)
+            MPI.Barrier(comm)
         end
     end
+
+    statprofilehtml(; path=joinpath("statprof-ColumnPivotLUMPI-$nproc", "profile-$rank"))
+
+    Profile.clear()
 
     Arcopy = allocate_shared_float(long_size, short_size)
     index_buffer = allocate_shared_int(nproc)
@@ -90,29 +96,34 @@ function mpi_benchmark(short_size::Integer, long_size::Integer, nsamples::Intege
         Ar = Matrix(transpose(Ac))
         ipiv = zeros(Int64, short_size)
 
-        println("RowPivotLUMPI Benchmark np=$nproc long_size=$long_size, short_size=$short_size, ", now())
+        Arcopy .= Ar
+
+        println("RowPivotLUMPI profile np=$nproc long_size=$long_size, short_size=$short_size, ", now())
         println("=====================================================================================")
         println()
     else
         Ar = nothing
         ipiv = zeros(Int64, 0)
     end
-    Alu = get_row_pivot_lu(ipiv, comm, index_buffer, maxabs_buffer)
+    Arplu = get_row_pivot_lu(ipiv, comm, index_buffer, maxabs_buffer)
+
+    MPI.Barrier(comm)
+    lu!(Arplu, Arcopy)
 
     MPI.Barrier(comm)
 
-    # Do a fixed number of samples (with no limit on benchmark time) to ensure that all
-    # MPI processes do exactly the same number of calls. Otherwise, the benchmark will
-    # hang intermittently.
-    b = @benchmark lu!($Alu, $Arcopy) setup=($rank == 0 && copyto!($Arcopy, $Ar); MPI.Barrier($comm)) teardown=(MPI.Barrier($comm)) samples=nsamples evals=1 seconds=Inf
-
-    if rank == 0
-        display(b)
-        println()
-        open(joinpath(dat_dir, "RP-$short_size-$long_size.dat"), "a") do io
-            println(io, minimum(b.times) * 1.0e-6)
+    @profile begin
+        for i ∈ 1:nsamples
+            if rank == 0
+                Arcopy .= Ar
+            end
+            MPI.Barrier(comm)
+            lu!(Arplu, Arcopy)
+            MPI.Barrier(comm)
         end
     end
+
+    statprofilehtml(; path=joinpath("statprof-RowPivotLUMPI-$nproc", "profile-$rank"))
 
     # Free the MPI.Win objects, because if they are free'd by the garbage collector it may
     # cause an MPI error or hang.
@@ -129,6 +140,6 @@ function mpi_benchmark(short_size::Integer, long_size::Integer, nsamples::Intege
 end
 
 MPI.Init()
-mpi_benchmark(128, 4096, 4000)
-mpi_benchmark(4096, 4096, 20)
-mpi_benchmark(8192, 8192, 4)
+#mpi_profile(128, 4096, 4000)
+#mpi_profile(4096, 4096, 20)
+mpi_profile(8192, 8192, 10)
