@@ -3,9 +3,10 @@ using Dates
 using LinearAlgebra
 using MPI
 using StableRNGs
+using TimerOutputs
 using ColumnPivotLUs
 
-function mpi_benchmark(short_size::Integer, long_size::Integer, nsamples::Integer)
+function mpi_profile(short_size::Integer, long_size::Integer, nsamples::Integer)
     BLAS.set_num_threads(1)
 
     comm = MPI.COMM_WORLD
@@ -47,8 +48,7 @@ function mpi_benchmark(short_size::Integer, long_size::Integer, nsamples::Intege
         return array
     end
 
-    dat_dir = "benchmark-data"
-    mkpath(dat_dir)
+    trace_dir = mkpath("traces")
 
     Accopy = allocate_shared_float(short_size, long_size)
     jpiv = allocate_shared_int(short_size)
@@ -58,27 +58,37 @@ function mpi_benchmark(short_size::Integer, long_size::Integer, nsamples::Intege
         rng = StableRNG(42)
         Ac = rand(short_size, long_size)
 
-        println("ColumnPivotLUMPI Benchmark np=$nproc short_size=$short_size, long_size=$long_size, ", now())
+        Accopy .= Ac
+
+        println("ColumnPivotLUMPI profile np=$nproc short_size=$short_size, long_size=$long_size, ", now())
         println("=====================================================================================")
         println()
     else
         Ac = nothing
     end
-    Alu = get_column_pivot_lu(jpiv, comm, index_buffer, maxabs_buffer)
+    ctimer = TimerOutput()
+    Acplu = get_column_pivot_lu(jpiv, comm, index_buffer, maxabs_buffer; timer=ctimer)
 
     MPI.Barrier(comm)
+    lu!(Acplu, Accopy)
 
-    # Do a fixed number of samples (with no limit on benchmark time) to ensure that all
-    # MPI processes do exactly the same number of calls. Otherwise, the benchmark will
-    # hang intermittently.
-    b = @benchmark lu!($Alu, $Accopy) setup=($rank == 0 && copyto!($Accopy, $Ac); MPI.Barrier($comm)) teardown=(MPI.Barrier($comm)) samples=nsamples evals=1 seconds=Inf
+    reset_timer!(ctimer)
+    MPI.Barrier(comm)
+
+    for i ∈ 1:nsamples
+        if rank == 0
+            Accopy .= Ac
+        end
+        MPI.Barrier(comm)
+        lu!(Acplu, Accopy)
+        MPI.Barrier(comm)
+    end
 
     if rank == 0
-        display(b)
-        println()
-        open(joinpath(dat_dir, "CP-$short_size-$long_size.dat"), "a") do io
-            println(io, minimum(b.times) * 1.0e-6)
-        end
+        display(ctimer)
+    end
+    open(joinpath(trace_dir, "CP-$short_size-$long_size.trace$rank"), "a") do io
+        show(io, ctimer)
     end
 
     Arcopy = allocate_shared_float(long_size, short_size)
@@ -88,27 +98,37 @@ function mpi_benchmark(short_size::Integer, long_size::Integer, nsamples::Intege
     if rank == 0
         Ar = Matrix(transpose(Ac))
 
-        println("RowPivotLUMPI Benchmark np=$nproc long_size=$long_size, short_size=$short_size, ", now())
+        Arcopy .= Ar
+
+        println("RowPivotLUMPI profile np=$nproc long_size=$long_size, short_size=$short_size, ", now())
         println("=====================================================================================")
         println()
     else
         Ar = nothing
     end
-    Alu = get_row_pivot_lu(ipiv, comm, index_buffer, maxabs_buffer)
+    rtimer = TimerOutput()
+    Arplu = get_row_pivot_lu(ipiv, comm, index_buffer, maxabs_buffer; timer=rtimer)
 
     MPI.Barrier(comm)
+    lu!(Arplu, Arcopy)
 
-    # Do a fixed number of samples (with no limit on benchmark time) to ensure that all
-    # MPI processes do exactly the same number of calls. Otherwise, the benchmark will
-    # hang intermittently.
-    b = @benchmark lu!($Alu, $Arcopy) setup=($rank == 0 && copyto!($Arcopy, $Ar); MPI.Barrier($comm)) teardown=(MPI.Barrier($comm)) samples=nsamples evals=1 seconds=Inf
+    reset_timer!(rtimer)
+    MPI.Barrier(comm)
+
+    for i ∈ 1:nsamples
+        if rank == 0
+            Arcopy .= Ar
+        end
+        MPI.Barrier(comm)
+        lu!(Arplu, Arcopy)
+        MPI.Barrier(comm)
+    end
 
     if rank == 0
-        display(b)
-        println()
-        open(joinpath(dat_dir, "RP-$short_size-$long_size.dat"), "a") do io
-            println(io, minimum(b.times) * 1.0e-6)
-        end
+        display(rtimer)
+    end
+    open(joinpath(trace_dir, "RP-$short_size-$long_size.trace$rank"), "a") do io
+        show(io, rtimer)
     end
 
     # Free the MPI.Win objects, because if they are free'd by the garbage collector it may
@@ -126,6 +146,6 @@ function mpi_benchmark(short_size::Integer, long_size::Integer, nsamples::Intege
 end
 
 MPI.Init()
-mpi_benchmark(128, 4096, 4000)
-mpi_benchmark(4096, 4096, 20)
-mpi_benchmark(8192, 8192, 4)
+mpi_profile(128, 4096, 4000)
+mpi_profile(4096, 4096, 20)
+mpi_profile(8192, 8192, 10)

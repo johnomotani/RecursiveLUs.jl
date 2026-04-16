@@ -8,7 +8,6 @@ using StatProfilerHTML
 using ColumnPivotLUs
 
 function mpi_profile(short_size::Integer, long_size::Integer, nsamples::Integer)
-    # Here we compare serial version of all algorithms.
     BLAS.set_num_threads(1)
 
     comm = MPI.COMM_WORLD

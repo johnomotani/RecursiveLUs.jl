@@ -5,7 +5,6 @@ using StableRNGs
 using ColumnPivotLUs
 
 function threaded_benchmark(short_size::Integer, long_size::Integer)
-    # Here we compare serial version of all algorithms.
     nt = Threads.nthreads()
     BLAS.set_num_threads(nt)
 

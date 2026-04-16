@@ -22,6 +22,7 @@ using LinearAlgebra.BLAS: trsm!
 using LinearAlgebra.LAPACK: getrf!
 using MPI
 using Primes
+using TimerOutputs
 
 import LinearAlgebra: lu!
 
@@ -29,13 +30,13 @@ import LinearAlgebra: lu!
 const block_size = 64
 
 # Total (m*n) matrix size to revert to serial solves for submatrices.
-const serial_threshold = 2^18 #8192
+const serial_threshold = 8192
 
 struct ColumnPivotLU
     jpiv::Vector{Int64}
 end
 
-struct ColumnPivotLUMPI{Vecint,Vecfloat}
+struct ColumnPivotLUMPI{Vecint,Vecfloat,Ttimer}
     jpiv::Vector{Int64}
     comm::MPI.Comm
     index_buffer::Vecint
@@ -47,13 +48,14 @@ struct ColumnPivotLUMPI{Vecint,Vecfloat}
     proc_j::Int64
     proc_J::Int64
     use_rectangular_parallelism_threshold::Int64
+    timer::Ttimer
 end
 
 struct RowPivotLU
     ipiv::Vector{Int64}
 end
 
-struct RowPivotLUMPI{Vecint,Vecfloat}
+struct RowPivotLUMPI{Vecint,Vecfloat,Ttimer}
     ipiv::Vecint
     comm::MPI.Comm
     index_buffer::Vecint
@@ -65,6 +67,17 @@ struct RowPivotLUMPI{Vecint,Vecfloat}
     proc_j::Int64
     proc_J::Int64
     use_rectangular_parallelism_threshold::Int64
+    timer::Ttimer
+end
+
+macro maybe_timeit(timer, name, expr)
+    return quote
+        if $(esc(timer)) === nothing
+            $(esc(expr))
+        else
+            @timeit $(esc(timer)) $(esc(name)) $(esc(expr))
+        end
+    end
 end
 
 """
@@ -96,7 +109,8 @@ processes in `comm`, whose length is at least the size of `comm`.
 """
 function get_column_pivot_lu(jpiv::Union{Vector{Int64},Nothing}, comm::MPI.Comm,
                              index_buffer::AbstractVector{<:Integer},
-                             maxabs_buffer::AbstractVector{<:Number})
+                             maxabs_buffer::AbstractVector{<:Number};
+                             timer::Union{TimerOutput,Nothing}=nothing)
     rank = MPI.Comm_rank(comm)
     nproc = MPI.Comm_size(comm)
 
@@ -116,7 +130,8 @@ function get_column_pivot_lu(jpiv::Union{Vector{Int64},Nothing}, comm::MPI.Comm,
     use_rectangular_parallelism_threshold = (8 * proc_I) ÷ proc_J
 
     return ColumnPivotLUMPI(jpiv, comm, index_buffer, maxabs_buffer, rank, nproc, proc_i,
-                            proc_I, proc_j, proc_J, use_rectangular_parallelism_threshold)
+                            proc_I, proc_j, proc_J, use_rectangular_parallelism_threshold,
+                            timer)
 end
 
 """
@@ -148,7 +163,8 @@ processes in `comm`, whose length is at least the size of `comm`.
 """
 function get_row_pivot_lu(ipiv::AbstractVector{<:Integer}, comm::MPI.Comm,
                           index_buffer::AbstractVector{<:Integer},
-                          maxabs_buffer::AbstractVector{<:Number})
+                          maxabs_buffer::AbstractVector{<:Number};
+                          timer::Union{TimerOutput,Nothing}=nothing)
     rank = MPI.Comm_rank(comm)
     nproc = MPI.Comm_size(comm)
 
@@ -168,7 +184,8 @@ function get_row_pivot_lu(ipiv::AbstractVector{<:Integer}, comm::MPI.Comm,
     use_rectangular_parallelism_threshold = (8 * proc_J) ÷ proc_I
 
     return RowPivotLUMPI(ipiv, comm, index_buffer, maxabs_buffer, rank, nproc, proc_i,
-                         proc_I, proc_j, proc_J, use_rectangular_parallelism_threshold)
+                         proc_I, proc_j, proc_J, use_rectangular_parallelism_threshold,
+                         timer)
 end
 
 function find_pivot(a::AbstractVector, n::Integer)
@@ -388,7 +405,9 @@ end
 # among processes, and do not divide rows.
 
 function lu!(cplu::ColumnPivotLUMPI, A::AbstractMatrix)
-    blocked_column_pivot_lu!(cplu, A, size(A, 1), size(A, 2))
+    @maybe_timeit cplu.timer "blocked_column_pivot_lu!" begin
+        blocked_column_pivot_lu!(cplu, A, size(A, 1), size(A, 2))
+    end
     return A
 end
 
@@ -419,81 +438,99 @@ function blocked_column_pivot_lu!(cplu::ColumnPivotLUMPI, A::AbstractMatrix, m::
 
         rectangular_parallelism = true
         for i ∈ 1:block_size:n_diag
-            ib = min(block_size, n_diag - i + 1)
-            ie = i + ib - 1
-            if rank == 0
-                this_jpiv = @view jpiv[i:n_diag]
-            else
-                # Not used, so just pass through jpiv.
-                this_jpiv = @view jpiv[1:0]
-            end
-
-            # Factor diagonal and right-of-diagonal blocks.
-            @views recursive_column_pivot_lu!(cplu, A[i:ie,i:n], this_jpiv, ib, n - i + 1)
-
-            # Apply interchanges to rows 1:i-1.
-            # Column swaps are not parallelised, because memory copies probably do not
-            # benefit much from parallism (limited just by memory bandwidth) and the
-            # swapping is inherently sequential.
-            if rank == 0 && i > 1
-                apply_column_swaps!(@view(A[1:i-1,i:n]), this_jpiv, i - 1, ib)
-            end
-
-            if i + ib ≤ m
-                m2 = m - ie
-                n2 = n - ie
-
-                # Once we switch off rectangular parallelism, the aspect ratio
-                # (width/height) of the matrix only gets larger, so we can stop checking.
-                if rectangular_parallelism && n2 > m2 * rectangular_threshold
-                    rectangular_parallelism = false
+            @maybe_timeit cplu.timer "i=$i" begin
+                ib = min(block_size, n_diag - i + 1)
+                ie = i + ib - 1
+                if rank == 0
+                    this_jpiv = @view jpiv[i:n_diag]
+                else
+                    # Not used, so just pass through jpiv.
+                    this_jpiv = @view jpiv[1:0]
                 end
 
-                # Apply interchanges to rows i+ib:m.
+                # Factor diagonal and right-of-diagonal blocks.
+                @maybe_timeit cplu.timer "recursive_column_pivot_lu!" begin
+                    @views recursive_column_pivot_lu!(cplu, A[i:ie,i:n], this_jpiv, ib, n - i + 1)
+                end
+
+                # Apply interchanges to rows 1:i-1.
                 # Column swaps are not parallelised, because memory copies probably do not
                 # benefit much from parallism (limited just by memory bandwidth) and the
                 # swapping is inherently sequential.
-                if rank == 0
-                    apply_column_swaps!(@view(A[ie+1:m,i:n]), this_jpiv, m2, ib)
-                end
-
-                MPI.Barrier(comm)
-
-                # Compute block column of L.
-                rows_per_proc = (m2 + nproc - 1) ÷ nproc
-                row_range = rank*rows_per_proc+ie+1:min((rank+1)*rows_per_proc+ie,m)
-                if !isempty(row_range)
-                    A21 = @view A[row_range,i:ie]
-                    @views trsm!('R', 'U', 'N', 'N', 1.0, A[i:ie,i:ie], A21)
-                end
-
-                MPI.Barrier(comm)
-
-                if i + ib ≤ n
-                    # Update trailing submatrix.
-                    if rectangular_parallelism
-                        cols_per_proc = (n2 + proc_J - 1) ÷ proc_J
-                        col_range = proc_j*cols_per_proc+ie+1:min((proc_j+1)*cols_per_proc+ie,n)
-                        rows_per_proc = (m2 + proc_I - 1) ÷ proc_I
-                        row_range = proc_i*rows_per_proc+ie+1:min((proc_i+1)*rows_per_proc+ie,m)
-                    else
-                        cols_per_proc = (n2 + nproc - 1) ÷ nproc
-                        col_range = rank*cols_per_proc+ie+1:min((rank+1)*cols_per_proc+ie,n)
-                        row_range = ie+1:m
-                    end
-                    if !isempty(col_range) && !isempty(row_range)
-                        A21 = @view A[row_range,i:ie]
-                        A12 = @view A[i:ie,col_range]
-                        A22 = @view A[row_range,col_range]
-                        mul!(A22, A21, A12, -1.0, 1.0)
+                if rank == 0 && i > 1
+                    @maybe_timeit cplu.timer "apply_column_swaps! upper" begin
+                        apply_column_swaps!(@view(A[1:i-1,i:n]), this_jpiv, i - 1, ib)
                     end
                 end
 
-                MPI.Barrier(comm)
+                if i + ib ≤ m
+                    m2 = m - ie
+                    n2 = n - ie
+
+                    # Once we switch off rectangular parallelism, the aspect ratio
+                    # (width/height) of the matrix only gets larger, so we can stop checking.
+                    if rectangular_parallelism && n2 > m2 * rectangular_threshold
+                        rectangular_parallelism = false
+                    end
+
+                    # Apply interchanges to rows i+ib:m.
+                    # Column swaps are not parallelised, because memory copies probably do not
+                    # benefit much from parallism (limited just by memory bandwidth) and the
+                    # swapping is inherently sequential.
+                    if rank == 0
+                        @maybe_timeit cplu.timer "apply_column_swaps!" begin
+                            apply_column_swaps!(@view(A[ie+1:m,i:n]), this_jpiv, m2, ib)
+                        end
+                    end
+
+                    @maybe_timeit cplu.timer "MPI.Barrier 1" begin
+                        MPI.Barrier(comm)
+                    end
+
+                    # Compute block column of L.
+                    @maybe_timeit cplu.timer "trsm!" begin
+                        rows_per_proc = (m2 + nproc - 1) ÷ nproc
+                        row_range = rank*rows_per_proc+ie+1:min((rank+1)*rows_per_proc+ie,m)
+                        if !isempty(row_range)
+                            A21 = @view A[row_range,i:ie]
+                            @views trsm!('R', 'U', 'N', 'N', 1.0, A[i:ie,i:ie], A21)
+                        end
+                    end
+
+                    @maybe_timeit cplu.timer "MPI.Barrier 2" begin
+                        MPI.Barrier(comm)
+                    end
+
+                    if i + ib ≤ n
+                        @maybe_timeit cplu.timer "mul!" begin
+                            # Update trailing submatrix.
+                            if rectangular_parallelism
+                                cols_per_proc = (n2 + proc_J - 1) ÷ proc_J
+                                col_range = proc_j*cols_per_proc+ie+1:min((proc_j+1)*cols_per_proc+ie,n)
+                                rows_per_proc = (m2 + proc_I - 1) ÷ proc_I
+                                row_range = proc_i*rows_per_proc+ie+1:min((proc_i+1)*rows_per_proc+ie,m)
+                            else
+                                cols_per_proc = (n2 + nproc - 1) ÷ nproc
+                                col_range = rank*cols_per_proc+ie+1:min((rank+1)*cols_per_proc+ie,n)
+                                row_range = ie+1:m
+                            end
+                            if !isempty(col_range) && !isempty(row_range)
+                                A21 = @view A[row_range,i:ie]
+                                A12 = @view A[i:ie,col_range]
+                                A22 = @view A[row_range,col_range]
+                                mul!(A22, A21, A12, -1.0, 1.0)
+                            end
+                        end
+                    end
+
+                    @maybe_timeit cplu.timer "MPI.Barrier 3" begin
+                        MPI.Barrier(comm)
+                    end
+                end
+
+                # Adjust pivot indices.
+                this_jpiv .+= i - 1
             end
-
-            # Adjust pivot indices.
-            this_jpiv .+= i - 1
         end
     end
 
@@ -798,7 +835,9 @@ function recursive_row_pivot_lu!(ipiv::AbstractVector{<:Integer}, A::AbstractMat
 end
 
 function lu!(rplu::RowPivotLUMPI, A::AbstractMatrix)
-    blocked_row_pivot_lu!(rplu, A, size(A, 1), size(A, 2))
+    @maybe_timeit rplu.timer "blocked_row_pivot_lu!" begin
+        blocked_row_pivot_lu!(rplu, A, size(A, 1), size(A, 2))
+    end
     return A
 end
 
@@ -830,77 +869,97 @@ function blocked_row_pivot_lu!(rplu::RowPivotLUMPI, A::AbstractMatrix, m::Intege
 
         rectangular_parallelism = true
         for j ∈ 1:block_size:n_diag
-            jb = min(block_size, n_diag - j + 1)
-            je = j + jb - 1
-            this_ipiv = @view ipiv[j:n_diag]
+            @maybe_timeit rplu.timer "j=$j" begin
+                jb = min(block_size, n_diag - j + 1)
+                je = j + jb - 1
+                this_ipiv = @view ipiv[j:n_diag]
 
-            # Factor diagonal and subdiagonal blocks.
-            @views recursive_row_pivot_lu!(rplu, A[j:m,j:je], this_ipiv, m - j + 1, jb)
-            MPI.Barrier(comm)
-
-            # Apply interchanges to columns 1:j-1.
-            if j > 1
-                cols_per_proc = (j - 1 + nproc - 1) ÷ nproc
-                col_range = rank*cols_per_proc+1:min((rank+1)*cols_per_proc,j-1)
-                if !isempty(col_range)
-                    apply_row_swaps!(@view(A[j:m,col_range]), this_ipiv,
-                                     length(col_range), jb)
+                # Factor diagonal and subdiagonal blocks.
+                @maybe_timeit rplu.timer "recursive_row_pivot_lu!" begin
+                    @views recursive_row_pivot_lu!(rplu, A[j:m,j:je], this_ipiv, m - j + 1, jb)
                 end
-            end
-
-            if j + jb ≤ n
-                m2 = m - je
-                n2 = n - je
-
-                # Once we switch off rectangular parallelism, the aspect ratio
-                # (width/height) of the matrix only gets smaller, so we can stop checking.
-                if rectangular_parallelism && m2 > n2 * rectangular_threshold
-                    rectangular_parallelism = false
+                @maybe_timeit rplu.timer "MPI.Barrier 1" begin
+                    MPI.Barrier(comm)
                 end
 
-                cols_per_proc = (n2 + nproc - 1) ÷ nproc
-                col_range = rank*cols_per_proc+je+1:min((rank+1)*cols_per_proc+je,n)
-
-                if !isempty(col_range)
-                    # Apply interchanges to columns j+jb:n.
-                    apply_row_swaps!(@view(A[j:m,col_range]), this_ipiv,
-                                     length(col_range), jb)
-
-                    # Compute block row of U.
-                    A12 = @view A[j:je,col_range]
-                    @views trsm!('L', 'L', 'N', 'U', 1.0, A[j:je,j:je], A12)
-                end
-
-                MPI.Barrier(comm)
-
-                if j + jb ≤ m
-                    # Update trailing submatrix.
-                    if rectangular_parallelism
-                        cols_per_proc = (n2 + proc_J - 1) ÷ proc_J
-                        col_range = proc_j*cols_per_proc+je+1:min((proc_j+1)*cols_per_proc+je,n)
-                        rows_per_proc = (m2 + proc_I - 1) ÷ proc_I
-                        row_range = proc_i*rows_per_proc+je+1:min((proc_i+1)*rows_per_proc+je,m)
-                    else
-                        col_range = je+1:n
-                        rows_per_proc = (m2 + nproc - 1) ÷ nproc
-                        row_range = rank*rows_per_proc+je+1:min((rank+1)*rows_per_proc+je,m)
-                    end
-                    if !isempty(col_range) && !isempty(row_range)
-                        A21 = @view A[row_range,j:je]
-                        A12 = @view A[j:je,col_range]
-                        A22 = @view A[row_range,col_range]
-                        mul!(A22, A21, A12, -1.0, 1.0)
+                # Apply interchanges to columns 1:j-1.
+                if j > 1
+                    @maybe_timeit rplu.timer "apply_row_swaps! left" begin
+                        cols_per_proc = (j - 1 + nproc - 1) ÷ nproc
+                        col_range = rank*cols_per_proc+1:min((rank+1)*cols_per_proc,j-1)
+                        if !isempty(col_range)
+                            apply_row_swaps!(@view(A[j:m,col_range]), this_ipiv,
+                                             length(col_range), jb)
+                        end
                     end
                 end
-            else
-                MPI.Barrier(comm)
-            end
 
-            # Adjust pivot indices.
-            if rank == 0
-                this_ipiv .+= j - 1
+                if j + jb ≤ n
+                    m2 = m - je
+                    n2 = n - je
+
+                    # Once we switch off rectangular parallelism, the aspect ratio
+                    # (width/height) of the matrix only gets smaller, so we can stop checking.
+                    if rectangular_parallelism && m2 > n2 * rectangular_threshold
+                        rectangular_parallelism = false
+                    end
+
+                    cols_per_proc = (n2 + nproc - 1) ÷ nproc
+                    col_range = rank*cols_per_proc+je+1:min((rank+1)*cols_per_proc+je,n)
+
+                    if !isempty(col_range)
+                        # Apply interchanges to columns j+jb:n.
+                        @maybe_timeit rplu.timer "apply_row_swaps!" begin
+                            apply_row_swaps!(@view(A[j:m,col_range]), this_ipiv,
+                                             length(col_range), jb)
+                        end
+
+                        # Compute block row of U.
+                        @maybe_timeit rplu.timer "trsm!" begin
+                            A12 = @view A[j:je,col_range]
+                            @views trsm!('L', 'L', 'N', 'U', 1.0, A[j:je,j:je], A12)
+                        end
+                    end
+
+                    @maybe_timeit rplu.timer "MPI.Barrier 2" begin
+                        MPI.Barrier(comm)
+                    end
+
+                    if j + jb ≤ m
+                        @maybe_timeit rplu.timer "mul!" begin
+                            # Update trailing submatrix.
+                            if rectangular_parallelism
+                                cols_per_proc = (n2 + proc_J - 1) ÷ proc_J
+                                col_range = proc_j*cols_per_proc+je+1:min((proc_j+1)*cols_per_proc+je,n)
+                                rows_per_proc = (m2 + proc_I - 1) ÷ proc_I
+                                row_range = proc_i*rows_per_proc+je+1:min((proc_i+1)*rows_per_proc+je,m)
+                            else
+                                col_range = je+1:n
+                                rows_per_proc = (m2 + nproc - 1) ÷ nproc
+                                row_range = rank*rows_per_proc+je+1:min((rank+1)*rows_per_proc+je,m)
+                            end
+                            if !isempty(col_range) && !isempty(row_range)
+                                A21 = @view A[row_range,j:je]
+                                A12 = @view A[j:je,col_range]
+                                A22 = @view A[row_range,col_range]
+                                mul!(A22, A21, A12, -1.0, 1.0)
+                            end
+                        end
+                    end
+                else
+                    @maybe_timeit rplu.timer "MPI.Barrier 2" begin
+                        MPI.Barrier(comm)
+                    end
+                end
+
+                # Adjust pivot indices.
+                if rank == 0
+                    this_ipiv .+= j - 1
+                end
+                @maybe_timeit rplu.timer "MPI.Barrier 3" begin
+                    MPI.Barrier(comm)
+                end
             end
-            MPI.Barrier(comm)
         end
     end
 
