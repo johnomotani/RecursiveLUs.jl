@@ -15,6 +15,17 @@ function mpi_profile(short_size::Integer, long_size::Integer, nsamples::Integer)
     rank = MPI.Comm_rank(comm)
     nproc = MPI.Comm_size(comm)
 
+    if rank == 0
+        println("""
+                WARNING!!!
+                ##########
+
+                These profiles are essentially useless, because the sampling becomes very
+                slow for large call stacks, which happen in the recursive_*_pivot_lu!()
+                functions.  The cost of the sampling then skews the results so that the
+                'blocked' and 'recursive' parts of the solve are not comparable.
+                """)
+    end
     local_win_store_float = nothing
     local_win_store_float = MPI.Win[]
     allocate_shared_float = (dims...)->begin
