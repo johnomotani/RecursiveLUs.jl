@@ -19,6 +19,7 @@ export get_column_pivot_lu, get_row_pivot_lu
 using Combinatorics
 using LinearAlgebra
 using LinearAlgebra.BLAS: trsm!
+using LinearAlgebra.LAPACK: getrf!
 using MPI
 using Primes
 
@@ -28,7 +29,7 @@ import LinearAlgebra: lu!
 const block_size = 64
 
 # Total (m*n) matrix size to revert to serial solves for submatrices.
-const serial_threshold = 8192
+const serial_threshold = 2^18 #8192
 
 struct ColumnPivotLU
     jpiv::Vector{Int64}
@@ -820,7 +821,8 @@ function blocked_row_pivot_lu!(rplu::RowPivotLUMPI, A::AbstractMatrix, m::Intege
         elseif m * n < serial_threshold
             # For small (sub-)matrices, revert to a serial solve.
             if rank == 0
-                return blocked_row_pivot_lu!(ipiv, A, m, n)
+                #return blocked_row_pivot_lu!(ipiv, A, m, n)
+                return getrf!(A, ipiv; check=false)
             else
                 return nothing
             end
@@ -936,7 +938,8 @@ function recursive_row_pivot_lu!(rplu::RowPivotLUMPI, A::AbstractMatrix,
         if m * n < serial_threshold
             # For small (sub-)matrices, revert to a serial solve.
             if rank == 0
-                recursive_row_pivot_lu!(ipiv, A, m, n)
+                #recursive_row_pivot_lu!(ipiv, A, m, n)
+                getrf!(A, ipiv; check=false)
             end
             MPI.Barrier(comm)
             return nothing
