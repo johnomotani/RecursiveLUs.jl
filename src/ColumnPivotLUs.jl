@@ -836,6 +836,7 @@ function blocked_row_pivot_lu!(rplu::RowPivotLUMPI, A::AbstractMatrix, m::Intege
 
             # Factor diagonal and subdiagonal blocks.
             @views recursive_row_pivot_lu!(rplu, A[j:m,j:je], this_ipiv, m - j + 1, jb)
+            MPI.Barrier(comm)
 
             # Apply interchanges to columns 1:j-1.
             if j > 1
@@ -860,16 +861,12 @@ function blocked_row_pivot_lu!(rplu::RowPivotLUMPI, A::AbstractMatrix, m::Intege
                 cols_per_proc = (n2 + nproc - 1) ÷ nproc
                 col_range = rank*cols_per_proc+je+1:min((rank+1)*cols_per_proc+je,n)
 
-                # Apply interchanges to columns j+jb:n.
                 if !isempty(col_range)
+                    # Apply interchanges to columns j+jb:n.
                     apply_row_swaps!(@view(A[j:m,col_range]), this_ipiv,
                                      length(col_range), jb)
-                end
 
-                MPI.Barrier(comm)
-
-                # Compute block row of U.
-                if !isempty(col_range)
+                    # Compute block row of U.
                     A12 = @view A[j:je,col_range]
                     @views trsm!('L', 'L', 'N', 'U', 1.0, A[j:je,j:je], A12)
                 end
@@ -941,7 +938,6 @@ function recursive_row_pivot_lu!(rplu::RowPivotLUMPI, A::AbstractMatrix,
                 #recursive_row_pivot_lu!(ipiv, A, m, n)
                 getrf!(A, ipiv; check=false)
             end
-            MPI.Barrier(comm)
             return nothing
         end
 
@@ -950,7 +946,6 @@ function recursive_row_pivot_lu!(rplu::RowPivotLUMPI, A::AbstractMatrix,
             if rank == 0
                 ipiv[1] = 1
             end
-            MPI.Barrier(comm)
         elseif n == 1
             # One column case.
             pivot_ind = find_pivot(rplu, @view(A[:,1]), m)
@@ -984,6 +979,8 @@ function recursive_row_pivot_lu!(rplu::RowPivotLUMPI, A::AbstractMatrix,
             # [ A21 ]
             recursive_row_pivot_lu!(rplu, @view(A[:,1:n1]), ipiv, m, n1)
 
+            MPI.Barrier(comm)
+
             # Apply interchanges to
             # [ A12 ]
             # [ --- ]
@@ -992,27 +989,15 @@ function recursive_row_pivot_lu!(rplu::RowPivotLUMPI, A::AbstractMatrix,
             col_range = rank*cols_per_proc+n1+1:min((rank+1)*cols_per_proc+n1,n)
             if !isempty(col_range)
                 apply_row_swaps!(@view(A[:,col_range]), ipiv, length(col_range), n1)
-            end
 
-            MPI.Barrier(comm)
-
-            # Solve A12
-            cols_per_proc = (n2 + nproc - 1) ÷ nproc
-            col_range = rank*cols_per_proc+n1+1:min((rank+1)*cols_per_proc+n1,n)
-            if !isempty(col_range)
+                # Solve A12
                 A12 = @view A[1:n1,col_range]
                 @views trsm!('L', 'L', 'N', 'U', 1.0, A[1:n1,1:n1], A12)
-            end
 
-            MPI.Barrier(comm)
-
-            # Update A22
-            rows_per_proc = (m2 + nproc - 1) ÷ nproc
-            row_range = rank*rows_per_proc+n1+1:min((rank+1)*rows_per_proc+n1,m)
-            if !isempty(row_range)
-                A12 = @view A[1:n1,n1+1:n]
-                A21 = @view A[row_range,1:n1]
-                A22 = @view A[row_range,n1+1:n]
+                # Update A22
+                A12 = @view A[1:n1,col_range]
+                A21 = @view A[n1+1:m,1:n1]
+                A22 = @view A[n1+1:m,col_range]
                 mul!(A22, A21, A12, -1.0, 1.0)
             end
 
@@ -1021,6 +1006,8 @@ function recursive_row_pivot_lu!(rplu::RowPivotLUMPI, A::AbstractMatrix,
             # Factor A22
             bottom_ipiv = @view ipiv[n1+1:n_diag]
             recursive_row_pivot_lu!(rplu, @view(A[n1+1:m,n1+1:n]), bottom_ipiv, m2, n2)
+
+            MPI.Barrier(comm)
 
             # Apply interchanges to A21.
             cols_per_proc = (n1 + nproc - 1) ÷ nproc
@@ -1034,7 +1021,6 @@ function recursive_row_pivot_lu!(rplu::RowPivotLUMPI, A::AbstractMatrix,
             if rank == 0
                 bottom_ipiv .+= n1
             end
-            MPI.Barrier(comm)
         end
     end
     return nothing
