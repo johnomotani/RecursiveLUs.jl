@@ -30,7 +30,7 @@ import LinearAlgebra: lu!
 const block_size = 64
 
 # Total (m*n) matrix size to revert to serial solves for submatrices.
-const serial_threshold = 8192
+const serial_threshold = 0
 
 struct ColumnPivotLU
     jpiv::Vector{Int64}
