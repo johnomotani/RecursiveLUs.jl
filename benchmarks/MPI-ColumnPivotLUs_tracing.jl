@@ -4,7 +4,7 @@ using LinearAlgebra
 using MPI
 using StableRNGs
 using TimerOutputs
-using MPIShardeMemLUs
+using MPISharedMemLUs
 
 function mpi_profile(short_size::Integer, long_size::Integer, nsamples::Integer)
     BLAS.set_num_threads(1)

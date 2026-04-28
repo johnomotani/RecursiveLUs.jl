@@ -3,7 +3,7 @@ using Dates
 using LinearAlgebra
 using MPI
 using StableRNGs
-using MPIShardeMemLUs
+using MPISharedMemLUs
 
 function mpi_benchmark(short_size::Integer, long_size::Integer, nsamples::Integer)
     BLAS.set_num_threads(1)

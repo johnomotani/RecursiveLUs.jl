@@ -2,7 +2,7 @@ using BenchmarkTools
 using Dates
 using LinearAlgebra
 using StableRNGs
-using MPIShardeMemLUs
+using MPISharedMemLUs
 
 function threaded_benchmark(short_size::Integer, long_size::Integer)
     nt = Threads.nthreads()

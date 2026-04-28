@@ -1,6 +1,6 @@
 using BenchmarkTools
 using LinearAlgebra
-using MPIShardeMemLUs
+using MPISharedMemLUs
 
 function serial_benchmark(short_size::Integer, long_size::Integer)
     # Here we compare serial version of all algorithms.
