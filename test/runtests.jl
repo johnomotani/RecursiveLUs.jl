@@ -1,4 +1,4 @@
-using ColumnPivotLUs
+using MPISharedMemLUs
 using LinearAlgebra
 using MPI
 using StableRNGs
@@ -182,7 +182,7 @@ function test_row_pivoting_mpi(m, n, tol)
     return nothing
 end
 
-@testset "ColumnPivotLUs.jl" begin
+@testset "MPISharedMemLUs.jl" begin
     if !MPI.Initialized()
         MPI.Init()
     end

@@ -1,4 +1,4 @@
-name = "ColumnPivotLUs"
+name = "MPISharedMemLUs"
 uuid = "16de62c6-7569-4410-9c3f-4d5d9d54e565"
 version = "0.1.0"
 authors = ["John Omotani <john.omotani@ukaea.uk> and contributors"]

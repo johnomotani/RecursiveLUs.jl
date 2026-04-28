@@ -4,14 +4,14 @@ LU factorizations, using algorithms copied from LAPACK
 Column-pivoting and row-pivoting variants of LU factorization. Parallelised using
 shared-memory MPI.
 
-The structs defined in ColumnPivotLUs are designed to be re-used with different sizes of
+The structs defined in MPISharedMemLUs are designed to be re-used with different sizes of
 matrix, so do not include the matrix storage, as would be usual in `LinearAlgebra.LU`,
 etc. The factors are returned in-place in the matrix passed to `lu!()`.
 
 The parallel version assumes that the arrays passed in (apart from `jpiv`) are MPI
 shared-memory arrays, which can be accessed by all processes in the MPI communicator.
 """
-module ColumnPivotLUs
+module MPISharedMemLUs
 
 export get_column_pivot_lu, get_row_pivot_lu
 

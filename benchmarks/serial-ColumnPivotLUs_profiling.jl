@@ -3,7 +3,7 @@ using LinearAlgebra
 using Profile
 using StableRNGs
 using StatProfilerHTML
-using ColumnPivotLUs
+using MPIShardeMemLUs
 
 function serial_profile(short_size::Integer, long_size::Integer, nsamples::Integer)
     BLAS.set_num_threads(1)

@@ -1,6 +1,6 @@
-# ColumnPivotLUs
+# MPIShardeMemLUs
 
-[![Build Status](https://github.com/johnomotani/ColumnPivotLUs.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/johnomotani/ColumnPivotLUs.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![Build Status](https://github.com/johnomotani/MPIShardeMemLUs.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/johnomotani/MPIShardeMemLUs.jl/actions/workflows/CI.yml?query=branch%3Amain)
 
 The package provides a variant of the
 [LAPACK](https://github.com/Reference-LAPACK/lapack/) LU factorisation algorithm that
